@@ -18,14 +18,13 @@
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
-from prettytable import PrettyTable
-
+from ..core.exceptions import ApiRequestError, InsufficientFundsError
 from ..decorators import log_action
 from ..infra.database import DatabaseManager
-from .models import Portfolio, User, Wallet
 from .currencies import get_currency
+from .models import Portfolio, User, Wallet
 from .utils import get_rate, validate_amount
-from ..core.exceptions import InsufficientFundsError
+
 
 class PortfolioService:
     """
@@ -157,7 +156,7 @@ class PortfolioService:
             return True
         except Exception as e:
             import sys
-            print(f"ОШИБКА: create_portfolio() не смог сохранить портфель: {e}", file=sys.stderr)
+            print(f"create_portfolio() не смог сохранить портфель: {e}", file=sys.stderr)
             return False
     
     @classmethod
@@ -181,13 +180,13 @@ class PortfolioService:
             data["portfolios"] = []
         p_dict = cls._find_portfolio(data, user_id)
         if p_dict is None:
-            return False, "Портфель не найден"
+            raise ValueError("Портфель не найден")
         
         portfolio = cls._restore_portfolio(p_dict, user_id)
         usd_wallet = portfolio.get_wallet("USD")
         
         if usd_wallet is None:
-            return False, "ОШИБКА: USD кошелек отсутствует"
+            raise ValueError("USD кошелек отсутствует")
         
         before = usd_wallet.balance
         usd_wallet.deposit(amt)
@@ -196,7 +195,7 @@ class PortfolioService:
         try:
             cls._save_portfolio(data, user_id, portfolio)
         except Exception as e:
-            return False, f"Ошибка сохранения портфеля: {e}"
+            raise Exception(f"Ошибка сохранения портфеля: {e}")
         
         amt_str = f"{amt:.2f}"
         before_str = f"{before:.2f}"
@@ -245,21 +244,24 @@ class PortfolioService:
              if int(p.get("user_id")) == int(user_id)), None)
         
         if not portfolio_dict:
-            return False, "Портфель не найден", None
+            raise ValueError("Портфель не найден")
         
         wallets = portfolio_dict.get("wallets") or {}
         portfolio_obj = cls._restore_portfolio(portfolio_dict, user_id)
 
-        # Если портфель пустой или кошельков нет, возвращаем сообщение об этом.
+        # Если портфель пустой или кошельков нет, возвращаем структурированные данные с пустым списком.
         if not isinstance(wallets, dict) or len(wallets) == 0:
-            return True, f"Портфель пользователя '{username}' пуст.", portfolio_obj
+            portfolio_data = {
+                "username": username,
+                "base": base,
+                "wallets": [],
+                "total": 0.0,
+                "is_empty": True
+            }
+            return True, portfolio_data, portfolio_obj
         
         total_in_base = 0.0
-        table = PrettyTable()
-        table.field_names = ["Currency","Balance", 
-                             f"Value ({base})", 
-                             f"Rate ({base}/cur)"]
-        table.align = "r"
+        wallet_list = []
         
         # Формируем отсортированный список кошельков.
         for currency_code in sorted(wallets.keys()):
@@ -275,28 +277,26 @@ class PortfolioService:
             try:
                 success, msg, rate, _updated_at = get_rate(currency_code, base)
             except Exception as e:
-                msg_err = f"Не удалось получить курс для {currency_code}→{base}: {str(e)}"
-                return False, msg_err, None
+                raise ApiRequestError(f"Не удалось получить курс для {currency_code}→{base}: {str(e)}")
             
             value_in_base = balance * rate
             total_in_base += value_in_base
-            bal_str = f"{balance:.4f}"
-            val_str = f"{value_in_base:,.4f}".replace(",", " ")
             
-            if currency_code == base:
-                rate_str = "1.00"
-            else:
-                rate_str = f"{rate:,.4f}".replace(",", " ")
-            value_with_base = val_str + " " + base
-            table.add_row([currency_code, bal_str, value_with_base, rate_str])
+            wallet_list.append({
+                "currency": currency_code,
+                "balance": balance,
+                "value_in_base": value_in_base,
+                "rate": rate
+            })
         
-        total_str = f"{total_in_base:,.2f}".replace(",", " ")
-        result = (
-            f"Портфель пользователя '{username}' (база: {base}):\n"
-            + str(table) + "\n"
-            + f"ИТОГО: {total_str} {base}"
-        )
-        return True, result, portfolio_obj
+        portfolio_data = {
+            "username": username,
+            "base": base,
+            "wallets": wallet_list,
+            "total": total_in_base,
+            "is_empty": False
+        }
+        return True, portfolio_data, portfolio_obj
 
     
     @classmethod
@@ -320,7 +320,7 @@ class PortfolioService:
         
         # Запрет на покупку USD
         if code == "USD":
-            return False, "Ошибка: покупать USD через buy нельзя. Используйте deposit для пополнения."
+            raise Exception("Покупать USD через buy нельзя. Используйте deposit для пополнения.")
         
         db = DatabaseManager()
         data = db.load_file("portfolios_file")
@@ -328,34 +328,30 @@ class PortfolioService:
             data["portfolios"] = []
         p_dict = cls._find_portfolio(data, user_id)
         if p_dict is None:
-            return False, "Портфель не найден"
+            raise Exception("Портфель не найден")
 
         portfolio = cls._restore_portfolio(p_dict, user_id)
-        
+
         # Проверка: наличия USD кошелька
         usd_wallet = portfolio.get_wallet("USD")
         if usd_wallet is None:
-            return False, "USD кошелек отсутствует. Покупка невозможна."
+            raise Exception("USD кошелек отсутствует. Покупка невозможна.")
         
         # Получение курса currency -> USD
-        try:
-            success, msg, rate, _updated_at = get_rate(code, "USD")
-        except Exception as e:
-            return False, f"Не удалось получить курс для {code}→USD: {e}"
+        success, msg, rate, _updated_at = get_rate(code, "USD")
         
         # Рассчитываем стоимость покупки в USD
         cost_usd = amt * rate
         
         # Проверка достаточной суммы на USD кошельке
         if usd_wallet.balance < cost_usd:
-            return False, (f"Недостаточно USD: требуется {cost_usd:.2f}, "
-                          f"доступно {usd_wallet.balance:.2f}")
+            raise InsufficientFundsError(available=usd_wallet.balance,
+                                         required=cost_usd,
+                                         code="USD"
+                                         )
         
         # Списываем сумму с USD кошелька
-        try:
-            usd_wallet.withdraw(cost_usd)
-        except InsufficientFundsError as e:
-            return False, str(e)
+        usd_wallet.withdraw(cost_usd)
         
         # Создаем кошелек целевой валюты если его нет
         if code not in portfolio.wallets:
@@ -365,20 +361,17 @@ class PortfolioService:
         if target_wallet is None:
             # Откатываем (восстанавливаем USD)
             usd_wallet.deposit(cost_usd)
-            return False, f"Не удалось создать кошелёк для {code}"
+            raise Exception(f"Не удалось создать кошелёк для {code}")
         
         # Пополняем кошелек с целевой валютой
-        before = target_wallet.balance
         target_wallet.deposit(amt)
-        after = target_wallet.balance
         
         #Сохраняем портфель
         try:
             cls._save_portfolio(data, user_id, portfolio)
         except Exception as e:
             usd_wallet.deposit(cost_usd)
-            target_wallet.balance = before
-            return False, f"Ошибка сохранения портфеля: {e}"
+            raise Exception(f"Ошибка сохранения портфеля: {e}")
         
         # Формируем сообщение с результатом операции
         rate_str = f"{rate:,.4f}".replace(",", " ")
@@ -416,7 +409,7 @@ class PortfolioService:
         
         # Запрет на продажу USD
         if code == "USD":
-            return False, "Ошибка: продавать USD нельзя."
+            raise Exception("Ошибка: продавать USD через sell нельзя.")
     
         db = DatabaseManager()
         data = db.load_file("portfolios_file")
@@ -424,34 +417,25 @@ class PortfolioService:
             data["portfolios"] = []
         p_dict = cls._find_portfolio(data, user_id)
         if p_dict is None:
-            return False, "Портфель не найден"
+            raise Exception("Портфель не найден")
 
         portfolio = cls._restore_portfolio(p_dict, user_id)
 
         # Проверка наличия кошелька исходной валюты
         if code not in portfolio.wallets:
-            return False, f"У вас нет кошелька '{code}'. Добавьте валюту: она создаётся автоматически при первой покупке."
+            raise ValueError(
+                f"У вас нет кошелька '{code}'. Добавьте валюту: она создаётся автоматически при первой покупке."
+            )
 
         wallet = portfolio.get_wallet(code)
         if wallet is None:
-            return False, f"Не удалось получить кошелёк для {code}"
+            raise Exception(f"Не удалось получить кошелёк для {code}")
 
-        before = wallet.balance
-        
         # Проверка достаточности средств на кошельке продаваемой валюты
-        try:
-            wallet.withdraw(amt)
-        except InsufficientFundsError as e:
-            return False, str(e)
-        
-        after = wallet.balance
+        wallet.withdraw(amt)
         
         # Получение курса и расчет выручки
-        try:
-            success, msg, rate, _updated_at = get_rate(code, "USD")
-        except Exception as e:
-            wallet.deposit(amt)
-            return False, f"Не удалось получить курс: {e}"
+        success, msg, rate, _updated_at = get_rate(code, "USD")
 
         proceeds_usd = amt * rate
         
@@ -459,7 +443,7 @@ class PortfolioService:
         usd_wallet = portfolio.get_wallet("USD")
         if usd_wallet is None:
             wallet.deposit(amt)
-            return False, "ОШИБКА: USD кошелек отсутствует. Продажа невозможна."
+            raise Exception("USD кошелек отсутствует. Продажа невозможна.")
         
         # Зачисляем выручку в USD
         usd_wallet.deposit(proceeds_usd)
@@ -470,14 +454,12 @@ class PortfolioService:
         except Exception as e:
             wallet.deposit(amt)
             usd_wallet.withdraw(proceeds_usd)
-            return False, f"Ошибка сохранения портфеля при продаже: {e}"
+            raise Exception(f"Ошибка сохранения портфеля при продаже: {e}")
 
         # Формируем успешное сообщение
         rate_str = f"{rate:,.4f}".replace(",", " ")
         proceeds_str = f"{proceeds_usd:,.2f}".replace(",", " ")
         amt_str = f"{amt:.4f}"
-        before_str = f"{before:.4f}"
-        after_str = f"{after:.4f}"
         usd_balance_str = f"{usd_wallet.balance:.2f}"
 
         msg = (
@@ -527,7 +509,7 @@ class UserService:
             users = users_data.get("users", [])
 
             if any(u.get("username") == username for u in users):
-                return False, f"Имя пользователя '{username}' уже занято."
+                raise ValueError(f"Имя пользователя '{username}' уже занято.")
 
             user_id = UserService._next_user_id(users)
 
@@ -557,7 +539,7 @@ class UserService:
                           f"Войдите: login --username {username} --password ****"
                           )
         except Exception as e:
-            return False, f"Ошибка регистрации: {e}"
+            raise Exception(f"Ошибка регистрации: {e}")
 
     @staticmethod
     @log_action(action_type="LOGIN")
@@ -586,14 +568,14 @@ class UserService:
             user = next((u for u in users if u.get("username") == username), None)
             
             if not user:
-                return False, f"Пользователь '{username}' не найден", None
+                raise ValueError(f"Пользователь '{username}' не найден")
 
             # Получение сохранённой соли и хеша
             salt = user.get("salt")
             stored_hashed = user.get("hashed_password")
 
             if not salt or not stored_hashed:
-                return False, "Некорректные данные пользователя", None
+                raise ValueError("Некорректные данные пользователя")
 
             try:
                 stored_date = user.get("registration_date")
@@ -612,9 +594,11 @@ class UserService:
             user_obj._registration_date = reg_date
 
             if not user_obj.verify_password(password):
-                return False, "Неверный пароль", None
+                raise ValueError("Неверный пароль")
             
             return True, f"Вы вошли как '{username}'", int(user["user_id"])
 
+        except ValueError:
+            raise
         except Exception as e:
-            return False, f"Ошибка авторизации: {e}", None
+            raise Exception(f"Ошибка авторизации: {e}")

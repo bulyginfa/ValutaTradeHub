@@ -2,11 +2,9 @@
 Утилиты и вспомогательные функции для работы с валютами и валидацией.
 """
 
-import json
 
 # core/validators.py
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional, Tuple
 
 from ..infra.database import DatabaseManager
@@ -56,16 +54,81 @@ def is_rate_fresh(updated_at: str, ttl_seconds: Optional[int] = None) -> bool:
             from ..infra.settings import SettingsLoader
             settings = SettingsLoader()
             ttl_seconds = settings.get("rates_ttl_seconds", 3600)
-        
-        dt = datetime.fromisoformat(updated_at)
+
+        dt = _parse_iso_datetime(updated_at)
+        if dt is None:
+            return False
         age = datetime.utcnow() - dt
         return age <= timedelta(seconds=ttl_seconds)
     except Exception:
         return False
 
 
+def _parse_iso_datetime(value: str) -> Optional[datetime]:
+    try:
+        if value.endswith("Z"):
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
 def fetch_rate_from_parser(f_code: str, t_code: str) -> Optional[float]:
-    # Здесь должен быть код для получения курса из парсера или API.
+    """Try to refresh rates via Parser Service and return a calculated rate."""
+    try:
+        from ..parser_service.config import ParserConfig
+        from ..parser_service.storage import RatesStorage
+        from ..parser_service.updater import RatesUpdater
+    except Exception:
+        return None
+
+    try:
+        config = ParserConfig()
+        storage = RatesStorage(
+            rates_file_path=config.RATES_FILE_PATH,
+            history_file_path=config.HISTORY_FILE_PATH,
+        )
+        updater = RatesUpdater(config=config, storage=storage)
+    except Exception:
+        return None
+
+    try:
+        updater.run_update()
+    except Exception:
+        return None
+
+    snapshot = storage.load_rates_snapshot()
+    pairs = snapshot.get("pairs") if isinstance(snapshot, dict) else None
+    pairs = pairs if isinstance(pairs, dict) else {}
+
+    if f_code == t_code:
+        return 1.0
+
+    direct_key = f"{f_code}_{t_code}"
+    if direct_key in pairs:
+        try:
+            return float(pairs[direct_key].get("rate"))
+        except Exception:
+            return None
+
+    from_key = f"{f_code}_USD"
+    to_key = f"{t_code}_USD"
+    from_entry = pairs.get(from_key)
+    to_entry = pairs.get(to_key)
+
+    try:
+        from_usd = float(from_entry.get("rate")) if isinstance(from_entry, dict) else None
+        to_usd = float(to_entry.get("rate")) if isinstance(to_entry, dict) else None
+    except Exception:
+        return None
+
+    if f_code == "USD" and to_usd and to_usd > 0:
+        return 1.0 / to_usd
+    if t_code == "USD" and from_usd and from_usd > 0:
+        return from_usd
+    if from_usd and to_usd and from_usd > 0 and to_usd > 0:
+        return from_usd / to_usd
+
     return None
 
 
@@ -94,17 +157,19 @@ def get_fresh_rate(from_currency: str, to_currency: str) -> Tuple[float, str]:
     # Загружаем кешированные курсы через DatabaseManager
     db = DatabaseManager()
     rates_data = db.load_file("rates_file")
+    pairs = rates_data.get("pairs") if isinstance(rates_data, dict) else None
+    rates_pairs = pairs if isinstance(pairs, dict) else rates_data
     rate_key = f"{from_code}_{to_code}"
 
     # Проверяем прямой курс, используя TTL из SettingsLoader
-    if rate_key in rates_data and is_rate_fresh(rates_data[rate_key].get("updated_at", "")):
-        rate_data = rates_data[rate_key]
+    if rate_key in rates_pairs and is_rate_fresh(rates_pairs[rate_key].get("updated_at", "")):
+        rate_data = rates_pairs[rate_key]
         return float(rate_data["rate"]), rate_data["updated_at"]
 
     # Проверяем обратный курс (например, USD→BTC вместо BTC→USD)
     rev_key = f"{to_code}_{from_code}"
-    if rev_key in rates_data and is_rate_fresh(rates_data[rev_key].get("updated_at", "")):
-        rate_data = rates_data[rev_key]
+    if rev_key in rates_pairs and is_rate_fresh(rates_pairs[rev_key].get("updated_at", "")):
+        rate_data = rates_pairs[rev_key]
         try:
             rev_rate = float(rate_data.get("rate"))
             if rev_rate == 0:
@@ -118,14 +183,43 @@ def get_fresh_rate(from_currency: str, to_currency: str) -> Tuple[float, str]:
     if fetched is None:
         raise ApiRequestError(f"Сервис курсов недоступен для {from_code}→{to_code}")
 
-    # Сохраняем обновленный курс с временной меткой
+    # После обновления перечитываем кеш, чтобы не затереть полный снимок.
+    refreshed_data = db.load_file("rates_file")
+    refreshed_pairs = refreshed_data.get("pairs") if isinstance(refreshed_data, dict) else None
+    refreshed_pairs = refreshed_pairs if isinstance(refreshed_pairs, dict) else refreshed_data
+
+    # Если свежий курс уже появился в кеше, возвращаем его без перезаписи файла.
+    if isinstance(refreshed_pairs, dict):
+        if rate_key in refreshed_pairs and is_rate_fresh(refreshed_pairs[rate_key].get("updated_at", "")):
+            rate_data = refreshed_pairs[rate_key]
+            return float(rate_data["rate"]), rate_data["updated_at"]
+
+        rev_key = f"{to_code}_{from_code}"
+        if rev_key in refreshed_pairs and is_rate_fresh(refreshed_pairs[rev_key].get("updated_at", "")):
+            rate_data = refreshed_pairs[rev_key]
+            try:
+                rev_rate = float(rate_data.get("rate"))
+                if rev_rate == 0:
+                    raise ZeroDivisionError()
+                return 1.0 / rev_rate, rate_data.get("updated_at", "")
+            except Exception:
+                pass
+
+    # Если кеш не содержит курс, добавляем его в текущий снимок.
     updated_at = datetime.utcnow().replace(microsecond=0).isoformat()
-    rates_data[rate_key] = {"rate": float(fetched), "updated_at": updated_at}
-    rates_data["last_refresh"] = updated_at
-    rates_data["source"] = "ParserService"
-    
-    db = DatabaseManager()
-    db.save_file("rates_file", rates_data)
+    if isinstance(refreshed_data, dict) and "pairs" in refreshed_data and isinstance(refreshed_data.get("pairs"), dict):
+        refreshed_data["pairs"][rate_key] = {"rate": float(fetched), "updated_at": updated_at}
+        refreshed_data["last_refresh"] = updated_at
+        refreshed_data["source"] = "ParserService"
+        db.save_file("rates_file", refreshed_data)
+    else:
+        # Старый формат кеша без обертки "pairs".
+        if not isinstance(refreshed_data, dict):
+            refreshed_data = {}
+        refreshed_data[rate_key] = {"rate": float(fetched), "updated_at": updated_at}
+        refreshed_data["last_refresh"] = updated_at
+        refreshed_data["source"] = "ParserService"
+        db.save_file("rates_file", refreshed_data)
 
     return float(fetched), updated_at
 
@@ -169,7 +263,8 @@ def get_rate(from_currency: str, to_currency: str) -> Tuple[bool, str, float, st
         reverse_rate = None
 
     try:
-        display_updated = datetime.fromisoformat(updated_at).strftime("%Y-%m-%d %H:%M:%S")
+        parsed_dt = _parse_iso_datetime(updated_at)
+        display_updated = parsed_dt.strftime("%Y-%m-%d %H:%M:%S") if parsed_dt else updated_at
     except Exception:
         display_updated = updated_at or "N/A"
 

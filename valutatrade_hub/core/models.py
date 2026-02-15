@@ -21,13 +21,12 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import secrets
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from .exceptions import InsufficientFundsError
 from .currencies import get_currency
+from .exceptions import InsufficientFundsError
 from .utils import get_rate, validate_amount
 
 
@@ -74,11 +73,8 @@ class User:
     def _check_password(value: str) -> str:
         """Вспомогательный метод для проверки сложности пароля."""
         value = "" if value is None else str(value)
-        pattern = r"^(?=.*\d)(?=.*[!@#$%^&*()_\-+=\[{\]};:'\",.<>/?\\|`~]).{4,}$"
-        if not re.match(pattern, value):
-            raise ValueError("Пароль должен быть не менее 4 символов и содержать "
-                             "хотя бы одну цифру и один спецсимвол."
-                            )
+        if len(value) < 4:
+            raise ValueError("Пароль должен быть не менее 4 символов.")
         return value
 
     def _make_hash(self, password: str) -> str:
@@ -103,8 +99,11 @@ class User:
 
     def verify_password(self, password: str) -> bool:
         """Проверка пароля на совпадение с сохранённым хешем"""
-        pwd = self._check_password(password)
-        return self._make_hash(pwd) == self._hashed_password
+        if password is None:
+            return False
+        payload = (str(password) + self._salt).encode("utf-8")
+        check_hash = hashlib.sha256(payload).hexdigest()
+        return check_hash == self._hashed_password
 
 
 class Wallet:

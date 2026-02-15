@@ -251,3 +251,4 @@ register_currency(FiatCurrency(name="Chinese Yuan", code="CNY", issuing_country=
 # Криптовалюты
 register_currency(CryptoCurrency(name="Bitcoin", code="BTC", algorithm="SHA-256", market_cap=1.12e12))
 register_currency(CryptoCurrency(name="Ethereum", code="ETH", algorithm="Ethash", market_cap=4.5e11))
+register_currency(CryptoCurrency(name="Solana", code="SOL", algorithm="PoH", market_cap=8e10))

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
 from valutatrade_hub.cli.interface import CLIInterface
+
+load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 
 WELCOME_TEXT = """
 ========================================
@@ -40,6 +46,7 @@ def run_cli() -> None:
             break
         except Exception as exc:
             print(f"Произошла ошибка: {exc}")
+
 
 def main() -> None:
     run_cli()

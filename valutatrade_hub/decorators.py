@@ -31,6 +31,36 @@ def log_action(
     def decorator(func: F) -> F:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            def _get_wallet_balance(user_id: Any, currency_code: Any) -> Optional[float]:
+                try:
+                    if user_id is None or currency_code is None:
+                        return None
+                    user_id_int = int(user_id)
+                    code = str(currency_code).strip().upper()
+                    if not code:
+                        return None
+                    from .infra.database import DatabaseManager
+
+                    db = DatabaseManager()
+                    data = db.load_file("portfolios_file")
+                    portfolios = data.get("portfolios", [])
+                    for p in portfolios:
+                        try:
+                            if int(p.get("user_id")) != user_id_int:
+                                continue
+                        except (TypeError, ValueError):
+                            continue
+                        wallets = p.get("wallets") or {}
+                        if not isinstance(wallets, dict):
+                            return None
+                        wallet = wallets.get(code) or wallets.get(code.upper())
+                        if wallet is None:
+                            return None
+                        balance = wallet.get("balance") if isinstance(wallet, dict) else wallet
+                        return float(balance)
+                except Exception:
+                    return None
+
             # Определяем имя действия
             action_name = action_type or func.__name__.upper()
             
@@ -48,6 +78,7 @@ def log_action(
             }
             
             # Парсим параметры функции
+            params = {}
             try:
                 sig = signature(func)
                 bound_args = sig.bind(*args, **kwargs)
@@ -74,10 +105,28 @@ def log_action(
                 
             except Exception:
                 pass  # Если не удалось спарсить, продолжаем без параметров
+
+            currency_for_wallet = None
+            if "currency" in params:
+                currency_for_wallet = params.get("currency")
+            elif action_name == "DEPOSIT":
+                currency_for_wallet = "USD"
+
+            if verbose and log_data.get("user_id") is not None:
+                log_data["wallet_before"] = _get_wallet_balance(
+                    log_data.get("user_id"),
+                    currency_for_wallet,
+                )
             
             # Выполняем функцию и ловим результат или исключение
             try:
                 result = func(*args, **kwargs)
+
+                if verbose and log_data.get("user_id") is not None:
+                    log_data["wallet_after"] = _get_wallet_balance(
+                        log_data.get("user_id"),
+                        currency_for_wallet,
+                    )
                 
                 # Пытаемся вытащить rate и другие данные из результата
                 if isinstance(result, tuple) and len(result) >= 2:

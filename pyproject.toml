@@ -10,6 +10,7 @@ packages = [{ include = "valutatrade_hub" }]
 python = "^3.12"
 prettytable = "^3.10.0"
 requests = "^2.32.0"
+python-dotenv = "^1.0.1"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.4.2"

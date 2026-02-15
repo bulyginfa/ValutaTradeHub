@@ -6,26 +6,10 @@
   "rates_file": "data/rates.json",
   
   "rates_ttl_seconds": 3600,
-  "cache_ttl_hours": 24,
-  
-  "default_base_currency": "USD",
-  "supported_currencies": ["USD", "EUR", "GBP", "JPY", "CNY"],
-  
+    
   "logs_dir": "logs",
   "log_file": "logs/actions.log",
   "log_level": "INFO",
-  "log_format": "json",
-  
-  "api_endpoints": {
-    "cryptoparallel": "https://api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
-    "forex_api": "https://forex-data-api.example.com/rates"
-  },
-  
-  "request_timeout_seconds": 10,
-  "max_retries": 3,
-  
-  "min_transaction_amount": 0.0001,
-  "max_transaction_amount": 1000000,
-  "password_min_length": 4
+  "log_format": "json"
 }
 

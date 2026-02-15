@@ -10,7 +10,9 @@ Singleton-класс для централизованной загрузки, �
 import json
 from pathlib import Path
 from typing import Any, Optional
+
 import tomllib
+
 
 class SettingsLoader:
     """
