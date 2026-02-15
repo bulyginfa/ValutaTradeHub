@@ -4,27 +4,30 @@ version = "0.1.0"
 description = "Учебный проект - платформа для отслеживания и симуляции торговли валютами"
 authors = ["Fedor Bulygin <fedya.bulygin@gmail.com>"]
 readme = "README.md"
-packages = [{include = "valutatrade_hub"}]
-
+packages = [{ include = "valutatrade_hub" }]
 
 [tool.poetry.dependencies]
-python = "^3.10"
+python = "^3.12"
 prettytable = "^3.10.0"
 requests = "^2.32.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.4.2"
-prettytable = "^3.10.0"
 
 [tool.poetry.scripts]
 project = "main:main"
 
 [tool.ruff]
-line-length = 88
+line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = []
+per-file-ignores = { "__init__.py" = ["F401"] }
 
-[tool.ruff.lint.per-file-ignores]
-"__init__.py" = ["F401"]
+[tool.valutatrade]
+config_file = "config.json"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
